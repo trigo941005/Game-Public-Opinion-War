@@ -1,0 +1,2210 @@
+import pygame
+import random
+import sys
+import pickle
+import os
+import time
+import threading
+
+# --- 遊戲設定與常數 ---
+WINDOW_WIDTH = 800
+WINDOW_HEIGHT = 600
+FPS = 60
+
+# 顏色定義 (R, G, B)
+WHITE = (200, 255, 200) # 駭客風：帶綠色的白
+BLACK = (0, 0, 0)
+BG_COLOR = (0, 10, 0)         # 駭客風：深黑綠背景
+PANEL_COLOR = (0, 30, 0)      # 駭客風：深綠區塊
+BUTTON_COLOR = (0, 60, 0)     # 駭客風：暗綠按鈕
+BUTTON_HOVER = (0, 180, 0)    # 駭客風：亮綠懸停
+TEXT_COLOR = (0, 255, 0)      # 駭客風：終端機綠
+GREEN = (0, 255, 0)
+RED = (255, 50, 50)
+GOLD = (255, 215, 0)
+
+# 任務類型顏色
+TYPE_POLITICS = (50, 150, 255)   # 政治：藍
+TYPE_COMMERCE = (255, 200, 50)   # 商業：金黃
+TYPE_ENTERTAINMENT = (255, 100, 200) # 娛樂：粉紅
+TYPE_COLORS = {"政治": TYPE_POLITICS, "商業": TYPE_COMMERCE, "娛樂": TYPE_ENTERTAINMENT}
+
+# 社群平台設定 (名稱: {風險係數, 波動率, 顏色})
+PLATFORMS = {
+    "FaceLook": {"risk": 1.0, "volatility": 0.1, "color": (66, 103, 178)},   # 標準
+    "Tweeter": {"risk": 0.7, "volatility": 0.35, "color": (29, 161, 242)},   # 低風險，高波動
+    "InstaGram": {"risk": 0.8, "volatility": 0.05, "color": (193, 53, 132)}, # 低風險，穩定
+    "Ptt": {"risk": 2.0, "volatility": 0.25, "color": (150, 150, 150)},      # 高風險
+}
+
+# 道具定義
+ITEMS = {
+    "vpn": {"name": "高級 VPN", "price": 200, "desc": "單次任務封號風險 -50%", "color": (100, 200, 255)},
+    "script": {"name": "擴散腳本", "price": 300, "desc": "單次任務影響力 +30%", "color": (255, 100, 255)},
+    "drink": {"name": "能量飲料", "price": 150, "desc": "[即時] 恢復所有帳號行動次數", "color": (255, 200, 50)},
+}
+
+# 科技定義
+TECHNOLOGIES = {
+    "stealth": {"name": "隱匿演算法", "desc": "降低 10% 封號風險", "base_cost": 500, "max_level": 5},
+    "influence": {"name": "分散式運算", "desc": "提升 10% 帳號影響力", "base_cost": 800, "max_level": 5},
+    "cost": {"name": "硬體批發", "desc": "降低 10% 購買/升級費用", "base_cost": 600, "max_level": 5},
+    "salary": {"name": "自動化腳本", "desc": "降低 10% 每日工資", "base_cost": 400, "max_level": 5},
+}
+
+# --- 路徑設定 ---
+if getattr(sys, 'frozen', False):
+    # 1. 存檔路徑：使用執行檔所在的目錄 (確保存檔不會消失)
+    BASE_DIR = os.path.dirname(sys.executable)
+    
+    # 2. 資源路徑：如果使用 --onefile 打包，資源會被解壓到 sys._MEIPASS
+    if hasattr(sys, '_MEIPASS'):
+        ASSET_DIR = sys._MEIPASS
+    else:
+        ASSET_DIR = BASE_DIR
+else:
+    # 開發模式：都在同一個目錄
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    ASSET_DIR = BASE_DIR
+
+# --- 全域設定 ---
+class GameSettings:
+    def __init__(self):
+        self.volume = 0.1
+
+SETTINGS = GameSettings()
+screen = None # 全域螢幕變數
+
+def update_volume(vol):
+    SETTINGS.volume = max(0.0, min(1.0, vol))
+    try:
+        pygame.mixer.music.set_volume(SETTINGS.volume)
+        for s in SOUNDS.values():
+            s.set_volume(SETTINGS.volume)
+    except:
+        pass
+
+# --- 音效系統 ---
+SOUNDS = {}
+
+def play_sound(name):
+    """播放音效的安全函式"""
+    if name in SOUNDS:
+        SOUNDS[name].play()
+
+def init_audio():
+    """初始化音效與背景音樂"""
+    pygame.mixer.init()
+    
+    # 載入背景音樂 (BGM)
+    bgm_path = os.path.join(ASSET_DIR, 'bgm.mp3')
+    try:
+        pygame.mixer.music.load(bgm_path)
+        pygame.mixer.music.set_volume(SETTINGS.volume)
+        pygame.mixer.music.play(-1) # -1 代表無限循環
+    except Exception:
+        print(f"提示：未找到背景音樂 ({bgm_path})")
+
+    # 載入音效 (SFX)
+    sfx_files = {
+        'click': 'click.wav',
+        'cash': 'cash.wav',
+        'success': 'success.wav',
+        'fail': 'fail.wav',
+        'alert': 'alert.wav',
+        'win': 'win.wav',
+        'lose': 'lose.wav',
+        'hover': 'hover.mp3' # 新增懸停音效
+    }
+    
+    for name, filename in sfx_files.items():
+        file_path = os.path.join(ASSET_DIR, filename)
+        try:
+            SOUNDS[name] = pygame.mixer.Sound(file_path)
+        except Exception:
+            pass # 找不到檔案就忽略，不影響遊戲
+        
+        # 統一設定音量
+        if name in SOUNDS:
+            SOUNDS[name].set_volume(SETTINGS.volume)
+
+# --- 核心邏輯類別 (與文字版類似) ---
+
+class Bot:
+    def __init__(self, level=1):
+        self.level = level
+        self.influence = level * 25 # 平衡調整：提升基礎影響力
+        self.stealth = 50 + (level * 4) # 修改：等級越高隱蔽越高 (Lv1:54 -> Lv10:90)
+        self.is_banned = False
+        self.max_uses = 1 + (level // 2) # 每日使用次數限制 (Lv1-2: 1次, Lv3-4: 2次...)
+        self.used_today = 0
+        self.bot_type = random.choice(["政治", "商業", "娛樂"]) # 隨機賦予類型
+
+    def get_upgrade_cost(self, discount=0.0):
+        base = self.level * 150
+        return int(base * (1.0 - discount))
+
+    def is_available(self):
+        return not self.is_banned and self.used_today < self.max_uses
+
+    def reset_daily(self):
+        self.used_today = 0
+
+    def upgrade(self):
+        self.level += 1
+        self.influence = self.level * 25
+        self.stealth = min(95, 50 + (self.level * 4))
+        self.max_uses = 1 + (self.level // 2)
+
+    def get_refund_amount(self):
+        if self.level <= 1: return 0
+        # 退還上一級升級費用的全額
+        return (self.level - 1) * 150
+
+    def downgrade(self):
+        if self.level > 1:
+            self.level -= 1
+            self.influence = self.level * 25
+            self.stealth = min(95, 50 + (self.level * 4))
+            self.max_uses = 1 + (self.level // 2)
+            return True
+        return False
+
+class Mission:
+    def __init__(self, name, difficulty, reward, required_influence, m_type="政治", platform="FaceLook"):
+        self.name = name
+        self.difficulty = difficulty
+        self.reward = reward
+        self.required_influence = required_influence
+        self.type = m_type
+        self.platform = platform
+
+class Achievement:
+    def __init__(self, key, title, desc, condition):
+        self.key = key
+        self.title = title
+        self.desc = desc
+        self.condition = condition
+        self.unlocked = False
+
+class FloatingText:
+    """浮動文字特效"""
+    def __init__(self, x, y, text, color):
+        self.x = x
+        self.y = y
+        self.text = text
+        self.color = color
+        self.timer = 60  # 持續 60 frames (約 1 秒)
+
+    def update(self):
+        self.y -= 1  # 向上飄移
+        self.timer -= 1
+
+    def draw(self, surface, font):
+        if self.timer > 0:
+            # 隨著時間稍微變透明的效果在 Pygame 比較複雜，這裡簡單處理位置移動
+            surf = font.render(self.text, True, self.color)
+            surface.blit(surf, (self.x, self.y))
+
+class DigitalRain:
+    """背景數位雨特效"""
+    def __init__(self):
+        self.drops = []
+        self.columns = WINDOW_WIDTH // 20
+        for i in range(self.columns):
+            self.drops.append({
+                'x': i * 20,
+                'y': random.randint(-WINDOW_HEIGHT, 0),
+                'speed': random.randint(2, 5),
+                'char': str(random.randint(0, 1))
+            })
+
+    def update(self):
+        for drop in self.drops:
+            drop['y'] += drop['speed']
+            if drop['y'] > WINDOW_HEIGHT:
+                drop['y'] = random.randint(-50, 0)
+                drop['speed'] = random.randint(2, 5)
+                drop['char'] = str(random.randint(0, 1))
+            if random.random() < 0.05:
+                drop['char'] = str(random.randint(0, 1))
+
+    def draw(self, surface, font):
+        for drop in self.drops:
+            # 使用深綠色作為背景，不搶眼
+            txt = font.render(drop['char'], True, (0, 100, 0))
+            surface.blit(txt, (drop['x'], int(drop['y'])))
+
+class Rival:
+    """敵對網軍系統"""
+    def __init__(self, name, color):
+        self.name = name
+        self.color = color
+        self.active = False
+
+    def update(self, game):
+        # 激活條件：第 5 天或聲望 > 300
+        if not self.active:
+            if game.day >= 5 or game.reputation >= 300:
+                self.active = True
+                game.log(f"【警告】偵測到敵對勢力「{self.name}」介入！")
+                play_sound('alert')
+            return
+
+        # 每日攻擊機率 (隨著天數微幅增加)
+        attack_chance = 0.20 + (game.day * 0.01)
+        # 困難模式加成
+        if game.difficulty == "Hard":
+            attack_chance += 0.15
+
+        if random.random() < attack_chance:
+            self.attack(game)
+
+    def attack(self, game):
+        attack_type = random.choice(["smear", "report", "hack"])
+        
+        if attack_type == "smear":
+            # 抹黑：降低聲望
+            dmg = random.randint(30, 80)
+            if game.reputation > 0:
+                game.reputation = max(0, game.reputation - dmg)
+                game.log(f"【敵對攻擊】{self.name} 散佈謠言！聲望 -{dmg}")
+                game.add_float_text(WINDOW_WIDTH//2, 300, f"聲望 -{dmg}", self.color)
+                play_sound('fail')
+            
+        elif attack_type == "report":
+            # 檢舉：封鎖帳號
+            targets = [b for b in game.bots if not b.is_banned]
+            if targets:
+                # 優先攻擊高等級帳號
+                targets.sort(key=lambda b: b.level, reverse=True)
+                victim = targets[0]
+                victim.is_banned = True
+                game.log(f"【敵對攻擊】{self.name} 惡意檢舉！Lv{victim.level} 帳號被封鎖")
+                game.add_float_text(WINDOW_WIDTH//2, 330, "帳號被封鎖!", self.color)
+                play_sound('alert')
+                
+        elif attack_type == "hack":
+            # 駭客：偷錢
+            loss = random.randint(100, 400)
+            if game.money >= loss:
+                game.money -= loss
+                game.log(f"【敵對攻擊】{self.name} 入侵金流系統！資金 -${loss}")
+                game.add_float_text(WINDOW_WIDTH//2, 360, f"-${loss}", self.color)
+                play_sound('alert')
+
+# --- 新增：輿論分析與輸入系統 (來自 Publicity Team 2.py) ---
+
+class InputBox:
+    def __init__(self, x, y, w, h, text=''):
+        self.rect = pygame.Rect(x, y, w, h)
+        self.color = GREEN
+        self.text = text
+        self.composition_text = "" 
+        self.active = True
+        self.is_auto = False # 標記是否為自動生成的文本
+        # 使用與主遊戲相同的字型邏輯
+        self.font = get_chinese_font(20)
+
+    def handle_event(self, event):
+        if event.type == pygame.TEXTINPUT:
+            self.text += event.text
+            self.composition_text = ""
+            self.is_auto = False # 玩家手動輸入
+        if event.type == pygame.TEXTEDITING:
+            self.composition_text = event.text
+            self.is_auto = False # 玩家正在編輯
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_BACKSPACE:
+                if not self.composition_text:
+                    self.text = self.text[:-1]
+                    self.is_auto = False # 玩家刪除/修改內容
+            elif event.key == pygame.K_RETURN:
+                temp_text = self.text
+                self.text = ''
+                self.composition_text = ''
+                return temp_text
+        return None
+
+    def draw(self, screen):
+        pygame.draw.rect(screen, (0, 30, 0), self.rect)
+        pygame.draw.rect(screen, self.color, self.rect, 2)
+        display_text = self.text + self.composition_text
+        txt_surface = self.font.render(display_text, True, WHITE)
+        screen.blit(txt_surface, (self.rect.x + 5, self.rect.y + 10))
+        pygame.key.set_text_input_rect(self.rect)
+
+class SentimentLogic:
+    """內建輿論分析核心"""
+    def __init__(self):
+        self.keywords = {
+            "positive": [
+                "讚", "好", "推", "神", "棒", "支持", "加油", "愛", "強", "喜歡", "優秀", "正義", "必勝",
+                "良心", "優質", "首選", "佛心", "大推", "感動", "期待", "完美", "第一", "高手", "專業"
+            ],
+            "negative": [
+                "爛", "廢", "滾", "差", "騙", "假", "怒", "黑", "噁", "垃圾", "無良", "抵制", "下台",
+                "失望", "後悔", "誇張", "傻眼", "拒用", "黑心", "地雷", "難吃", "難看", "浪費", "低能"
+            ],
+            "intense": [
+                "死", "殺", "爆", "血", "幹", "操", "絕對", "一定", "全家", "!!!", "！",
+                "超級", "非常", "無敵", "爆炸", "究極", "嚴重", "徹底"
+            ],
+            "sarcasm": [
+                "反串", "友軍", "好棒棒", "笑死", "這一定是", "難道", "不意外", "藏頭", "高級黑",
+                "喔是喔", "好喔", "厲害了", "天才", "神邏輯"
+            ]
+        }
+        # 定義不同劇本的權重 (讓相同關鍵字在不同場合有不同效果)
+        self.scenario_weights = {
+            "政治": {"positive": 0.8, "negative": 1.5, "intense": 1.5}, # 政治：負面攻擊與煽動更有效
+            "商業": {"positive": 1.5, "negative": 1.2, "intense": 0.8}, # 商業：正面宣傳為主
+            "娛樂": {"positive": 1.0, "negative": 1.0, "intense": 1.2}, # 娛樂：標準權重
+        }
+        # 定義文案模板 (用於自動生成)
+        self.copy_templates = {
+            "政治": {
+                "pos": ["全力支持！這才是我們要的政策！", "為了下一代，必須支持！", "正義或許會遲到，但絕不會缺席。", "做得好！大家給予肯定！"],
+                "neg": ["這政策根本是圖利財團！", "反對到底！絕不妥協！", "大家看清楚這嘴臉！", "這根本是黑箱作業！", "太扯了，這種話也說得出口？"]
+            },
+            "商業": {
+                "pos": ["真心推薦，CP值超高！", "良心企業，一生推！", "品質真的沒話說，大推。", "服務態度很好，會再回購。"],
+                "neg": ["這產品品質堪憂，大家小心。", "還是隔壁家的比較好用。", "聽說這家公司財務有問題...", "買過最後悔的一次。", "這根本是詐欺！退錢！"]
+            },
+            "娛樂": {
+                "pos": ["神作！必須支持！", "太好看了，感動落淚。", "這演技我給滿分！", "期待很久了，果然沒讓人失望。"],
+                "neg": ["這瓜真大！", "笑死，這什麼操作？", "某人又要翻車了嗎？", "這演技我給零分。", "這根本是炒作吧？"]
+            }
+        }
+
+    def generate_copy(self, mission_type, mission_name=""):
+        # 根據任務名稱判斷意圖 (正面支持 vs 負面攻擊)
+        sentiment = "neg" # 預設為負面/爭議性 (水軍常態)
+        if any(k in mission_name for k in ["支持", "洗白", "正面", "推廣", "引導", "平反"]):
+            sentiment = "pos"
+        
+        # 取得對應類型的模板
+        type_templates = self.copy_templates.get(mission_type, self.copy_templates["政治"])
+        # 從對應的情感分類中隨機挑選
+        return random.choice(type_templates.get(sentiment, type_templates["neg"]))
+
+    def analyze(self, text, mission_type="政治"):
+        score = 0.0
+        incitement = 1
+        is_sarcastic = False
+
+        # 取得當前劇本的權重
+        weights = self.scenario_weights.get(mission_type, {"positive": 1.0, "negative": 1.0, "intense": 1.0})
+
+        # 偵測反串
+        for k in self.keywords["sarcasm"]:
+            if k in text:
+                is_sarcastic = True
+                incitement += 2 # 反串通常自帶嘲諷值
+                break
+
+        for k in self.keywords["positive"]:
+            if k in text: score += 0.3 * weights["positive"]
+        for k in self.keywords["negative"]:
+            if k in text: score -= 0.3 * weights["negative"]
+        for k in self.keywords["intense"]:
+            if k in text: incitement += 2 * weights["intense"]
+        
+        # 標點符號強度偵測
+        incitement += text.count("!") + text.count("！") + text.count("?") + text.count("？")
+
+        # 雜湊補償 (Procedural Fallback)：讓非關鍵字的輸入也能產生獨特結果
+        # 如果完全沒對應到關鍵字，使用文字的 Hash 值來產生一個固定的「偽情感分數」
+        if score == 0 and len(text) > 0:
+            # 將文字轉為數字總和，取餘數產生 -0.5 ~ 0.5 的波動
+            text_hash = sum(ord(c) for c in text)
+            pseudo_score = ((text_hash % 100) / 50.0) - 1.0 
+            score = pseudo_score * 0.5 # 影響力減半，避免隨機輸入強過關鍵字
+            # 字數越多，預設強度越高
+            if len(text) > 8: incitement += 1
+        
+        # 反串處理：分數反轉
+        if is_sarcastic:
+            score = -score
+            # 如果原本是中立，反串通常帶有負面嘲諷意味
+            if abs(score) < 0.1:
+                score = -0.5
+
+        score = max(-1.0, min(1.0, score))
+        incitement = min(10, incitement)
+        if score == 0: score = random.uniform(-0.1, 0.1)
+        return score, incitement
+
+class NewsTicker:
+    """底部新聞跑馬燈"""
+    def __init__(self):
+        self.y = WINDOW_HEIGHT - 30
+        self.x = WINDOW_WIDTH
+        self.headlines = [
+            "【快訊】社群平台 FaceLook 宣布加強審查機制...",
+            "【財經】科技股今日重挫，原因不明...",
+            "【政治】大選將至，網路輿論戰開打...",
+            "【社會】網紅爆料：某知名企業涉嫌洗錢...",
+            "【國際】駭客組織「暗網聯合」宣稱對此次攻擊負責...",
+            "【生活】專家建議：不要輕信網路未經證實的消息...",
+        ]
+        self.current_idx = 0
+        self.speed = 2
+        self.bg_rect = pygame.Rect(0, self.y, WINDOW_WIDTH, 30)
+
+    def add_headline(self, text):
+        """插入一則優先新聞"""
+        self.headlines.insert(self.current_idx + 1, text)
+
+    def update(self):
+        self.x -= self.speed
+        if self.x < -800: # 假設文字長度
+            self.x = WINDOW_WIDTH
+            self.current_idx = (self.current_idx + 1) % len(self.headlines)
+
+    def draw(self, surface, font):
+        pygame.draw.rect(surface, (0, 20, 0), self.bg_rect)
+        pygame.draw.line(surface, (0, 60, 0), (0, self.y), (WINDOW_WIDTH, self.y), 1)
+        text = self.headlines[self.current_idx]
+        surf = font.render(text, True, (0, 200, 0))
+        surface.blit(surf, (self.x, self.y + 5))
+
+class GameState:
+    """管理遊戲數據與邏輯"""
+    def __init__(self, difficulty="Standard"):
+        self.difficulty = difficulty
+        if difficulty == "Easy":
+            self.money = 2000
+            self.base_risk_modifier = 0.7
+            self.target_reputation = 3000
+            self.salary_per_bot = 20 # 簡單模式工資
+        elif difficulty == "Hard":
+            self.money = 500
+            self.base_risk_modifier = 1.3
+            self.target_reputation = 10000
+            self.salary_per_bot = 80 # 困難模式工資
+        else:
+            self.money = 1000
+            self.base_risk_modifier = 1.0
+            self.target_reputation = 5000
+            self.salary_per_bot = 50 # 普通模式工資
+
+        self.risk_modifier = self.base_risk_modifier
+        self.bots = [Bot() for _ in range(5)]
+        self.available_missions = []
+        self.day = 1
+        self.reputation = 0
+        self.pending_money = 0 # 待結算資金 (隔日入帳)
+        self.selected_mission = None # 當前選中的任務（等待選擇策略）
+        self.deploy_count = 0 # 準備派出的帳號數量
+        self.game_over = False
+        self.victory = False
+        self.bankruptcy_days = 0 # 破產倒數計數器
+        self.current_filename = None # 追蹤當前存檔檔名
+        self.logs = [f"歡迎來到《網路水軍模擬器》！難度: {difficulty}", "請購買帳號或選擇任務開始。"]
+        self.history = [{'day': 1, 'money': self.money, 'reputation': 0}] # 歷史數據
+        self.rival = Rival("暗網聯合", (255, 50, 50)) # 初始化對手
+        self.news_ticker = NewsTicker() # 新聞跑馬燈
+        self.sentiment = SentimentLogic() # 輿論分析引擎
+        self.manual_mode = False # 是否處於手動輸入模式
+        self.inventory = {} # 道具清單 {item_key: count}
+        self.research = {k: 0 for k in TECHNOLOGIES.keys()} # 科技等級 {tech_key: level}
+        
+        # --- 新手教學 ---
+        self.show_tutorial = True
+        self.tutorial_step = 0
+        self.tutorial_data = [
+            {"text": "歡迎來到《網路水軍模擬器》！\n\n在這裡，你將扮演一名水軍指揮官，\n操控輿論，賺取資金，並達成聲望目標。", "rect": None},
+            {"text": "【頂部資訊欄】\n\n顯示目前的資金、聲望與帳號數量。\n資金用於營運，聲望則是獲勝條件。", "rect": (20, 10, 760, 60)},
+            {"text": "【任務列表】\n\n這裡會列出可執行的委託。\n選擇任務後，可指派帳號進行操作。\n高報酬通常伴隨著高風險！", "rect": (20, 80, 480, 350)},
+            {"text": "【帳號部隊】\n\n方塊代表你的水軍帳號。\n顏色代表狀態 (綠=正常, 紅=封鎖)。\n點擊方塊可花費資金升級能力。", "rect": (20, 440, 480, 100)},
+            {"text": "【系統日誌】\n\n右側顯示所有重要訊息。\n包含收益入帳、帳號被封鎖等警告，\n請隨時留意這裡的資訊。", "rect": (520, 80, 260, 340)},
+            {"text": f"【營運機制】\n\n每日需支付工資 (每人 ${self.salary_per_bot})。\n資金不足將進入破產倒數，\n連續 3 天赤字將導致遊戲結束！", "rect": None},
+            {"text": "【操作面板】\n\n下方按鈕用於購買新帳號、\n進入下一天(結算收益)或管理存檔。\n\n準備好了嗎？開始你的網軍生涯吧！", "rect": (20, 530, 760, 60)}
+        ]
+
+        # --- 成就系統 ---
+        self.achievements = [
+            Achievement("bots_10", "初出茅廬", "擁有 10 個帳號", lambda g: len(g.bots) >= 10),
+            Achievement("bots_50", "水軍指揮官", "擁有 50 個帳號", lambda g: len(g.bots) >= 50),
+            Achievement("bots_100", "百萬大軍", "擁有 100 個帳號", lambda g: len(g.bots) >= 100),
+            Achievement("level_3", "技術升級", "擁有 Lv3 以上帳號", lambda g: any(b.level >= 3 for b in g.bots)),
+            Achievement("level_5", "頂尖駭客", "擁有 Lv5 以上帳號", lambda g: any(b.level >= 5 for b in g.bots)),
+            Achievement("level_10", "網軍教父", "擁有 Lv10 以上帳號", lambda g: any(b.level >= 10 for b in g.bots)),
+            Achievement("money_10k", "資本巨鱷", "持有資金超過 $10000", lambda g: g.money >= 10000),
+            Achievement("money_100k", "富可敵國", "持有資金超過 $100000", lambda g: g.money >= 100000),
+            Achievement("rep_2k", "意見領袖", "聲望達到 2000", lambda g: g.reputation >= 2000),
+            Achievement("rep_10k", "輿論之神", "聲望達到 10000", lambda g: g.reputation >= 10000),
+        ]
+        self.achievement_queue = [] # 等待顯示的成就
+        self.achievement_timer = 0  # 通知顯示計時器
+        self.current_achievement_msg = None
+
+        self.floating_texts = [] # 視覺特效列表
+
+        self.generate_missions()
+
+    def log(self, message):
+        """新增訊息到日誌視窗"""
+        self.logs.append(message)
+        if len(self.logs) > 20: # 只保留最近 20 條訊息
+            self.logs.pop(0)
+
+    def add_float_text(self, x, y, text, color):
+        """新增浮動文字"""
+        self.floating_texts.append(FloatingText(x, y, text, color))
+
+    def generate_missions(self):
+        mission_types = [
+            ("引導論壇議題風向", 2, 600, 100, "娛樂"),
+            ("製造假民意支持特定政策", 4, 1200, 250, "政治"),
+            ("煽動社群群體對立", 6, 2500, 500, "政治"),
+            ("抹黑競爭對手公眾形象", 8, 4000, 800, "商業"),
+            ("洗白企業重大醜聞", 10, 8000, 1200, "商業"),
+            ("操縱選舉輿論走向", 15, 20000, 2500, "政治"),
+            ("散佈恐慌性假消息", 12, 12000, 1500, "娛樂")
+        ]
+        self.available_missions = []
+        
+        # 根據聲望篩選可接的任務類型
+        valid_types = [m for m in mission_types if self.reputation >= (m[1] * 5) - 20]
+        if not valid_types:
+            valid_types = [mission_types[0], mission_types[1]]
+
+        # 難度隨天數成長 (每天增加 5% 需求與報酬)
+        difficulty_scale = 1.0 + (self.day * 0.05)
+
+        # 隨機生成 3 到 5 個任務
+        num_missions = random.randint(3, 5)
+        for _ in range(num_missions):
+            m_data = random.choice(valid_types)
+            # 數值微調 (波動 +/- 10%)
+            variance = random.uniform(0.9, 1.1)
+            m_platform = random.choice(list(PLATFORMS.keys()))
+            
+            scaled_reward = int(m_data[2] * variance * difficulty_scale)
+            scaled_req = int(m_data[3] * variance * difficulty_scale)
+            
+            self.available_missions.append(Mission(
+                m_data[0],
+                m_data[1],
+                scaled_reward,
+                scaled_req,
+                m_data[4],
+                m_platform
+            ))
+
+    def check_status(self):
+        """檢查遊戲是否結束"""
+        if self.game_over: return
+
+        # 勝利條件：聲望達標
+        if self.reputation >= self.target_reputation:
+            self.game_over = True
+            self.victory = True
+            play_sound('win')
+        
+        # 失敗條件：沒錢買帳號 且 沒有活著的帳號
+        active_bots = [b for b in self.bots if not b.is_banned]
+        if (self.money + self.pending_money) < 100 and len(active_bots) == 0:
+            self.game_over = True
+            self.victory = False
+            play_sound('lose')
+        
+        # 失敗條件：連續 3 天資金為負 (破產)
+        if self.bankruptcy_days >= 3:
+            self.game_over = True
+            self.victory = False
+            play_sound('lose')
+            
+            # 破產刪檔機制
+            if self.current_filename:
+                try:
+                    target_file = os.path.join(BASE_DIR, self.current_filename)
+                    if os.path.exists(target_file):
+                        os.remove(target_file)
+                        self.log(f"公司破產！已刪除紀錄: {self.current_filename}")
+                except Exception as e:
+                    print(f"刪除失敗: {e}")
+
+    def check_achievements(self):
+        """檢查是否有新成就解鎖"""
+        for ach in self.achievements:
+            if not ach.unlocked and ach.condition(self):
+                ach.unlocked = True
+                msg = f"成就解鎖：{ach.title} ({ach.desc})"
+                self.achievement_queue.append(msg)
+                self.log(f"★ {msg}")
+                play_sound('success')
+
+    def buy_bot(self, count=1):
+        # 應用科技折扣
+        discount = self.research.get("cost", 0) * 0.1
+        unit_cost = int(100 * (1.0 - discount))
+        cost = unit_cost * count
+        
+        if self.money >= cost:
+            self.money -= cost
+            for _ in range(count):
+                self.bots.append(Bot())
+            self.log(f"購買成功！新增 {count} 個帳號。")
+            self.add_float_text(100, 650, f"-${cost}", RED)
+            play_sound('cash')
+        else:
+            self.log(f"資金不足！需要 ${cost}。")
+        self.check_status()
+        self.check_achievements()
+
+    def upgrade_bot(self, bot):
+        if bot.is_banned:
+            self.log("無法升級已封鎖帳號。")
+            return
+        # 應用科技折扣
+        discount = self.research.get("cost", 0) * 0.1
+        cost = bot.get_upgrade_cost(discount)
+        if self.money >= cost:
+            self.money -= cost
+            bot.upgrade()
+            self.log(f"升級成功！Lv{bot.level} (花費 ${cost})")
+            self.add_float_text(pygame.mouse.get_pos()[0], pygame.mouse.get_pos()[1], f"-${cost}", RED)
+            play_sound('cash')
+        else:
+            self.log(f"資金不足！升級需 ${cost}")
+        self.check_status()
+        self.check_achievements()
+
+    def downgrade_bot(self, bot):
+        if bot.level <= 1:
+            self.log("無法降級：已是最低等級")
+            return
+        
+        refund = bot.get_refund_amount()
+        if bot.downgrade():
+            self.money += refund
+            self.log(f"降級成功！Lv{bot.level} (退還 ${refund})")
+            self.add_float_text(pygame.mouse.get_pos()[0], pygame.mouse.get_pos()[1], f"+${refund}", GOLD)
+            play_sound('cash')
+        self.check_status()
+
+    def upgrade_all_bots(self):
+        """批量升級所有可用帳號"""
+        active_bots = [b for b in self.bots if not b.is_banned]
+        # 優先升級低等級的 (便宜)
+        active_bots.sort(key=lambda b: b.level)
+        
+        count = 0
+        total_cost = 0
+        discount = self.research.get("cost", 0) * 0.1
+        for bot in active_bots:
+            cost = bot.get_upgrade_cost(discount)
+            if self.money >= cost:
+                self.money -= cost
+                bot.upgrade()
+                total_cost += cost
+                count += 1
+            else:
+                break # 沒錢了
+        
+        if count > 0:
+            self.log(f"批量升級: {count} 個帳號 (花費 ${total_cost})")
+            self.add_float_text(300, 650, f"-${total_cost}", RED)
+            play_sound('cash')
+        else:
+            self.log("資金不足以升級任何帳號")
+        self.check_status()
+        self.check_achievements()
+
+    def execute_mission(self, mission, strategy="normal", bot_count=0, manual_bonus=0, use_item=None):
+        # 篩選可用帳號並優先使用等級高的 (或是隨意，這裡用預設順序)
+        available_bots = [b for b in self.bots if b.is_available()]
+        # 根據等級排序，優先派出高等級帳號
+        available_bots.sort(key=lambda b: b.level, reverse=True)
+        
+        bots_to_use = available_bots[:bot_count]
+        for b in bots_to_use:
+            b.used_today += 1
+            
+        total_influence = 0
+        for b in bots_to_use:
+            bonus = 1.5 if hasattr(b, 'bot_type') and b.bot_type == mission.type else 1.0
+            # 應用科技加成 (影響力)
+            tech_bonus = 1.0 + (self.research.get("influence", 0) * 0.1)
+            total_influence += int(b.influence * bonus * tech_bonus)
+        
+        # 平台參數
+        plat_data = PLATFORMS.get(mission.platform, PLATFORMS["FaceLook"])
+        volatility = plat_data['volatility']
+        plat_risk = plat_data['risk']
+
+        # 策略加成計算
+        risk_factor = 1.0
+        inf_factor = 1.0
+        strat_name = "一般操作"
+
+        if strategy == "spam":
+            inf_factor = 1.5
+            risk_factor = 2.0
+            strat_name = "暴力洗版"
+        elif strategy == "troll":
+            inf_factor = 0.8
+            risk_factor = 0.5
+            strat_name = "反串釣魚"
+        elif strategy == "manual":
+            inf_factor = 1.2 + manual_bonus # 手動模式基礎加成 + 分析加成
+            risk_factor = 1.0
+            strat_name = "手動操盤"
+        
+        # 道具效果應用
+        item_note = ""
+        if use_item and self.inventory.get(use_item, 0) > 0:
+            self.inventory[use_item] -= 1
+            if use_item == "vpn":
+                risk_factor *= 0.5
+                item_note = "(VPN防護啟動)"
+            elif use_item == "script":
+                inf_factor *= 1.3
+                item_note = "(腳本擴散中)"
+            self.log(f"使用了道具: {ITEMS[use_item]['name']}")
+            play_sound('click')
+
+        # 加入隨機波動
+        random_factor = random.uniform(1.0 - volatility, 1.0 + volatility)
+        final_influence = int(total_influence * inf_factor * random_factor)
+        
+        self.log(f"[{strat_name}] 執行: {mission.name} {item_note}")
+        self.log(f"影響力: {final_influence} (波動:{int(random_factor*100)}%) / 需求: {mission.required_influence}")
+
+        if final_influence >= mission.required_influence:
+            self.pending_money += mission.reward
+            self.reputation += mission.difficulty
+            self.log(f"任務成功！報酬 ${mission.reward} 將於明日入帳")
+            self.add_float_text(400, 300, f"+${mission.reward} (待入帳)", GOLD)
+            self.add_float_text(400, 330, f"+{mission.difficulty} 聲望", GREEN)
+            play_sound('success')
+            self.news_ticker.add_headline(f"【熱議】{mission.name} 引發網友瘋狂轉發！")
+            self.trigger_ban_wave(mission.difficulty * risk_factor * plat_risk, bots_to_use)
+        else:
+            self.reputation = max(0, self.reputation - 2)
+            self.log("任務失敗！影響力不足。")
+            self.add_float_text(400, 300, "任務失敗", RED)
+            play_sound('fail')
+            self.trigger_ban_wave((mission.difficulty // 2) * risk_factor * plat_risk, bots_to_use)
+            self.news_ticker.add_headline(f"【闢謠】平台官方澄清：{mission.name} 為不實消息。")
+
+        # 任務執行後移除
+        if mission in self.available_missions:
+            self.available_missions.remove(mission)
+        self.check_status()
+        self.check_achievements()
+
+    def get_prediction(self, mission, strategy, bot_count):
+        """計算任務成功率預測"""
+        available_bots = [b for b in self.bots if b.is_available()]
+        available_bots.sort(key=lambda b: b.level, reverse=True)
+        bots_to_use = available_bots[:bot_count]
+
+        total_influence = 0
+        for b in bots_to_use:
+            bonus = 1.5 if hasattr(b, 'bot_type') and b.bot_type == mission.type else 1.0
+            total_influence += int(b.influence * bonus)
+
+        plat_data = PLATFORMS.get(mission.platform, PLATFORMS["FaceLook"])
+        volatility = plat_data['volatility']
+        
+        inf_factor = 1.0
+        if strategy == "spam": inf_factor = 1.5
+        elif strategy == "troll": inf_factor = 0.8
+
+        base_inf = total_influence * inf_factor
+        min_inf = base_inf * (1.0 - volatility)
+        max_inf = base_inf * (1.0 + volatility)
+        
+        req = mission.required_influence
+        
+        if min_inf >= req:
+            success_rate = 100
+        elif max_inf < req:
+            success_rate = 0
+        else:
+            success_rate = int(((max_inf - req) / (max_inf - min_inf)) * 100)
+            
+        return success_rate, int(min_inf), int(max_inf)
+
+    def trigger_ban_wave(self, risk_level, target_bots=None):
+        bots_to_check = target_bots if target_bots is not None else self.bots
+        banned_count = 0
+        for bot in bots_to_check:
+            if bot.is_banned: continue
+            # 簡單的機率計算
+            # 應用科技加成 (隱蔽性)
+            tech_reduction = self.research.get("stealth", 0) * 0.1
+            base_risk = risk_level * 3 * self.risk_modifier * (1.0 - tech_reduction)
+            mitigation = bot.stealth * 0.5
+            if random.randint(0, 100) < (base_risk - mitigation):
+                bot.is_banned = True
+                banned_count += 1
+        
+        if banned_count > 0:
+            self.log(f"警告！平台反制，損失了 {banned_count} 個帳號！")
+            self.add_float_text(WINDOW_WIDTH//2, WINDOW_HEIGHT//2, f"損失 {banned_count} 帳號!", RED)
+            play_sound('alert')
+        self.check_status()
+        self.check_achievements()
+
+    def next_day(self):
+        self.day += 1
+        
+        # 結算昨日收益
+        if self.pending_money > 0:
+            self.money += self.pending_money
+            self.log(f"昨日收益 ${self.pending_money} 已入帳")
+            self.add_float_text(150, 50, f"+${self.pending_money}", GOLD)
+            play_sound('cash')
+            self.pending_money = 0
+
+        # 清理被封鎖的帳號
+        for b in self.bots:
+            b.reset_daily()
+        original_count = len(self.bots)
+        self.bots = [b for b in self.bots if not b.is_banned]
+        removed = original_count - len(self.bots)
+        
+        # 支付每日工資
+        # 應用科技折扣 (工資)
+        salary_discount = self.research.get("salary", 0) * 0.1
+        salary_cost = int(len(self.bots) * self.salary_per_bot * (1.0 - salary_discount))
+        if salary_cost > 0:
+            self.money -= salary_cost
+            self.log(f"支付工資: ${salary_cost} (${self.salary_per_bot}/人)")
+            self.add_float_text(150, 80, f"-${salary_cost} (工資)", RED)
+
+        # 檢查是否破產 (資金為負)
+        if self.money < 0:
+            self.bankruptcy_days += 1
+            self.log(f"⚠ 資金赤字！破產倒數: {self.bankruptcy_days}/3")
+            play_sound('alert')
+        else:
+            self.bankruptcy_days = 0
+
+        # 重置風險值並觸發隨機事件
+        self.risk_modifier = self.base_risk_modifier
+        self.trigger_random_event()
+        
+        # 對手行動
+        self.rival.update(self)
+        self.news_ticker.add_headline(f"【日報】第 {self.day} 天結束，市場局勢詭譎多變...")
+        
+        # 記錄歷史數據
+        self.history.append({'day': self.day, 'money': self.money, 'reputation': self.reputation})
+
+        self.generate_missions()
+        self.log(f"=== 第 {self.day} 天 ===")
+        if removed > 0:
+            self.log(f"昨日共有 {removed} 個帳號被永久封鎖。")
+        self.check_status()
+        self.check_achievements()
+        
+        # 自動存檔
+        if not self.game_over:
+            self.save_game("autosave.pkl")
+
+    def trigger_random_event(self):
+        """觸發每日隨機事件"""
+        if random.random() < 0.3: # 30% 機率觸發
+            events = [
+                ("平台演算法更新", "今日風險係數加倍！", lambda: setattr(self, 'risk_modifier', self.risk_modifier * 2.0)),
+                ("加密貨幣暴漲", "獲得額外資金 $300", lambda: setattr(self, 'money', self.money + 300)),
+                ("網軍醜聞曝光", "聲望下降 50 點", lambda: setattr(self, 'reputation', max(0, self.reputation - 50))),
+                ("黑客工具流出", "今日風險係數減半", lambda: setattr(self, 'risk_modifier', self.risk_modifier * 0.5)),
+            ]
+            name, desc, effect = random.choice(events)
+            effect()
+            self.log(f"【隨機事件】{name}: {desc}")
+            self.add_float_text(WINDOW_WIDTH//2, 200, f"事件: {name}", (255, 100, 255))
+            play_sound('alert')
+
+    def save_game(self, filename='savegame.pkl'):
+        """儲存遊戲狀態"""
+        if not filename.endswith('.pkl'):
+            filename += '.pkl'
+        self.current_filename = filename # 更新當前檔名
+        filepath = os.path.join(BASE_DIR, filename)
+        data = {
+            'money': self.money,
+            'pending_money': self.pending_money,
+            'bots': self.bots,
+            'available_missions': self.available_missions,
+            'day': self.day,
+            'reputation': self.reputation,
+            'difficulty': self.difficulty,
+            'base_risk_modifier': self.base_risk_modifier,
+            'target_reputation': self.target_reputation,
+            'logs': self.logs,
+            'unlocked_achievements': [a.key for a in self.achievements if a.unlocked],
+            'bankruptcy_days': self.bankruptcy_days,
+            'current_filename': self.current_filename,
+            'history': self.history,
+            'rival': self.rival,
+            'research': self.research
+        }
+        try:
+            with open(filepath, 'wb') as f:
+                pickle.dump(data, f)
+            self.log(f"遊戲進度已儲存至 {filename}")
+        except Exception as e:
+            self.log(f"儲存失敗: {e}")
+
+    def load_game(self, filename):
+        """讀取遊戲狀態"""
+        filepath = os.path.join(BASE_DIR, filename)
+        if not os.path.exists(filepath):
+            self.log("檔案不存在。")
+            return
+
+        try:
+            with open(filepath, 'rb') as f:
+                data = pickle.load(f)
+            
+            # 更新當前物件屬性
+            self.__dict__.update(data)
+            self.current_filename = filename # 確保讀取後更新當前檔名
+            
+            # 資料遷移：確保舊存檔的機器人有新屬性
+            for b in self.bots:
+                if not hasattr(b, 'max_uses'):
+                    b.max_uses = 1 + (b.level // 2)
+                if not hasattr(b, 'used_today'):
+                    b.used_today = 0
+                b.influence = b.level * 25 # 更新數值平衡
+            if not hasattr(self, 'pending_money'):
+                self.pending_money = 0
+            if not hasattr(self, 'base_risk_modifier'):
+                self.base_risk_modifier = self.risk_modifier
+            if not hasattr(self, 'floating_texts'):
+                self.floating_texts = []
+            if not hasattr(self, 'salary_per_bot'):
+                if self.difficulty == "Easy": self.salary_per_bot = 20
+                elif self.difficulty == "Hard": self.salary_per_bot = 80
+                else: self.salary_per_bot = 50
+            if not hasattr(self, 'bankruptcy_days'):
+                self.bankruptcy_days = 0
+            if not hasattr(self, 'history'):
+                self.history = [{'day': self.day, 'money': self.money, 'reputation': self.reputation}]
+            if not hasattr(self, 'rival'):
+                self.rival = Rival("暗網聯合", (255, 50, 50))
+            if not hasattr(self, 'news_ticker'): self.news_ticker = NewsTicker()
+            if not hasattr(self, 'sentiment'): self.sentiment = SentimentLogic()
+            if not hasattr(self, 'manual_mode'): self.manual_mode = False
+            if not hasattr(self, 'inventory'): self.inventory = {}
+            if not hasattr(self, 'research'): 
+                self.research = {k: 0 for k in TECHNOLOGIES.keys()}
+            
+            # 類型系統相容性
+            for b in self.bots:
+                if not hasattr(b, 'bot_type'):
+                    b.bot_type = random.choice(["政治", "商業", "娛樂"])
+            for m in self.available_missions:
+                if not hasattr(m, 'type'):
+                    m.type = random.choice(["政治", "商業", "娛樂"])
+                if not hasattr(m, 'platform'):
+                    m.platform = "FaceLook"
+
+            # 新手教學相容性
+            if not hasattr(self, 'show_tutorial'):
+                self.show_tutorial = False
+                self.tutorial_step = 0
+            self.tutorial_data = [
+                {"text": "歡迎來到《網路水軍模擬器》！\n\n在這裡，你將扮演一名水軍指揮官，\n操控輿論，賺取資金，並達成聲望目標。", "rect": None},
+                {"text": "【頂部資訊欄】\n\n顯示目前的資金、聲望與帳號數量。\n資金用於營運，聲望則是獲勝條件。", "rect": (20, 10, 760, 60)},
+                {"text": "【任務列表】\n\n這裡會列出可執行的委託。\n選擇任務後，可指派帳號進行操作。\n高報酬通常伴隨著高風險！", "rect": (20, 80, 480, 350)},
+                {"text": "【帳號部隊】\n\n方塊代表你的水軍帳號。\n顏色代表狀態 (綠=正常, 紅=封鎖)。\n點擊方塊可花費資金升級能力。", "rect": (20, 440, 480, 100)},
+                {"text": "【系統日誌】\n\n右側顯示所有重要訊息。\n包含收益入帳、帳號被封鎖等警告，\n請隨時留意這裡的資訊。", "rect": (520, 80, 260, 340)},
+                {"text": f"【營運機制】\n\n每日需支付工資 (每人 ${self.salary_per_bot})。\n資金不足將進入破產倒數，\n連續 3 天赤字將導致遊戲結束！", "rect": None},
+                {"text": "【操作面板】\n\n下方按鈕用於購買新帳號、\n進入下一天(結算收益)或管理存檔。\n\n準備好了嗎？開始你的網軍生涯吧！", "rect": (20, 530, 760, 60)}
+            ]
+
+            # 恢復成就狀態
+            if hasattr(self, 'unlocked_achievements'):
+                for ach in self.achievements:
+                    if ach.key in self.unlocked_achievements:
+                        ach.unlocked = True
+
+            # 重置暫時狀態 (避免讀檔後介面卡住)
+            self.selected_mission = None
+            self.game_over = False
+            self.victory = False
+            
+            self.log(f"已讀取: {filename}")
+        except Exception as e:
+            self.log(f"讀取失敗: {e}")
+
+# --- UI 輔助類別 ---
+
+class Button:
+    def __init__(self, x, y, w, h, text, callback):
+        self.rect = pygame.Rect(x, y, w, h)
+        self.text = text
+        self.callback = callback
+        self.color = BUTTON_COLOR
+        self.hovered = False
+
+    def draw(self, surface, font):
+        mouse_pos = pygame.mouse.get_pos()
+        is_hovering = self.rect.collidepoint(mouse_pos)
+        
+        # 懸停音效邏輯
+        if is_hovering and not self.hovered:
+            play_sound('hover')
+        self.hovered = is_hovering
+
+        # 滑鼠懸停變色效果
+        current_color = BUTTON_HOVER if is_hovering else self.color
+        text_color = BLACK if is_hovering else TEXT_COLOR # 懸停時文字變黑，背景變亮
+        
+        pygame.draw.rect(surface, BLACK, self.rect) # 黑色底
+        pygame.draw.rect(surface, current_color, self.rect, 2) # 綠色框 (駭客風不填充)
+        if is_hovering:
+             pygame.draw.rect(surface, current_color, self.rect) # 懸停時填充
+        
+        text_surf = font.render(self.text, True, text_color)
+        text_rect = text_surf.get_rect(center=self.rect.center)
+        surface.blit(text_surf, text_rect)
+
+    def check_click(self, event):
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.rect.collidepoint(event.pos):
+                play_sound('click')
+                self.callback()
+
+# --- 主程式 ---
+
+def get_chinese_font(size=24):
+    """嘗試獲取系統中的中文字型"""
+    # 常見的中文字型名稱列表 (Windows, Mac, Linux)
+    font_names = ["microsoftjhenghei", "pingfangtc", "heiti", "simhei", "arialunicode"]
+    font_path = pygame.font.match_font(font_names)
+    
+    if font_path:
+        return pygame.font.Font(font_path, size)
+    else:
+        print("警告：找不到中文字型，文字可能無法顯示。")
+        return pygame.font.Font(None, size)
+
+def account_management_screen(screen, game, font, title_font):
+    """帳號管理頁面"""
+    clock = pygame.time.Clock()
+    running = True
+    page = 0
+    items_per_page = 8 # 縮減每頁顯示數量以適應 600px 高度
+    
+    # 內部按鈕
+    btn_back = Button(30, WINDOW_HEIGHT - 70, 100, 50, "返回", lambda: None)
+    btn_upgrade_all = Button(150, WINDOW_HEIGHT - 70, 250, 50, "一鍵升級 (低等優先)", game.upgrade_all_bots)
+
+    while running:
+        screen.fill(BG_COLOR)
+        
+        # 標題
+        screen.blit(title_font.render("帳號管理中心", True, GOLD), (30, 20))
+        screen.blit(font.render(f"資金: ${game.money} | 帳號總數: {len(game.bots)}", True, WHITE), (30, 60))
+
+        # 列表標頭
+        headers = ["ID", "類型", "等級", "影響", "隱蔽", "用量", "狀態", "費用"]
+        x_pos = [40, 100, 170, 240, 310, 380, 460, 550] # 優化間距
+        pygame.draw.line(screen, WHITE, (20, 90), (780, 90), 2)
+        for i, h in enumerate(headers):
+            screen.blit(font.render(h, True, GOLD), (x_pos[i], 100))
+        pygame.draw.line(screen, WHITE, (20, 130), (780, 130), 2)
+
+        # 列表內容
+        total_pages = (len(game.bots) - 1) // items_per_page + 1
+        if page >= total_pages: page = max(0, total_pages - 1)
+        
+        start = page * items_per_page
+        end = min(start + items_per_page, len(game.bots))
+        
+        y = 140
+        for i in range(start, end):
+            bot = game.bots[i]
+            color = WHITE
+            status = "正常"
+            discount = game.research.get("cost", 0) * 0.1
+            cost_str = f"${bot.get_upgrade_cost(discount)}"
+            
+            if bot.is_banned:
+                color = RED
+                status = "已封鎖"
+                cost_str = "-"
+            
+            row = [
+                f"#{i+1}", f"{bot.bot_type}", f"Lv.{bot.level}", f"{bot.influence}", 
+                f"{bot.stealth}", f"{bot.used_today}/{bot.max_uses}", 
+                status, cost_str
+            ]
+            
+            for j, txt in enumerate(row):
+                screen.blit(font.render(txt, True, color), (x_pos[j], y))
+            
+            # 單個升級按鈕
+            if not bot.is_banned:
+                btn_rect = pygame.Rect(650, y, 80, 30)
+                pygame.draw.rect(screen, BUTTON_COLOR, btn_rect)
+                pygame.draw.rect(screen, TEXT_COLOR, btn_rect, 1)
+                screen.blit(font.render("升級", True, WHITE), (665, y+2))
+            
+            y += 40
+
+        # 底部提示
+        screen.blit(font.render("提示: 對 [升級] 按鈕點擊右鍵可降級並退款", True, (150, 150, 150)), (300, WINDOW_HEIGHT - 40))
+
+        # 頁碼與翻頁箭頭
+        page_str = f"頁: {page+1}/{max(1, total_pages)}"
+        screen.blit(font.render(page_str, True, WHITE), (650, 60))
+        
+        # 繪製翻頁按鈕區域 (簡單圖示)
+        prev_rect = pygame.Rect(620, 60, 20, 20)
+        next_rect = pygame.Rect(750, 60, 20, 20)
+        pygame.draw.polygon(screen, WHITE, [(635, 65), (635, 75), (625, 70)])
+        pygame.draw.polygon(screen, WHITE, [(755, 65), (755, 75), (765, 70)])
+
+        btn_back.draw(screen, font)
+        btn_upgrade_all.draw(screen, font)
+
+        pygame.display.flip()
+        
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if btn_back.rect.collidepoint(event.pos):
+                    running = False
+                    play_sound('click')
+                if btn_upgrade_all.rect.collidepoint(event.pos):
+                    btn_upgrade_all.callback()
+                
+                # 翻頁
+                if prev_rect.collidepoint(event.pos) and page > 0:
+                    page -= 1
+                    play_sound('click')
+                if next_rect.collidepoint(event.pos) and page < total_pages - 1:
+                    page += 1
+                    play_sound('click')
+                
+                # 單個升級點擊偵測
+                y_check = 140
+                for i in range(start, end):
+                    bot = game.bots[i]
+                    if not bot.is_banned:
+                        btn_rect = pygame.Rect(650, y_check, 80, 30)
+                        if btn_rect.collidepoint(event.pos):
+                            if event.button == 1: # 左鍵升級
+                                game.upgrade_bot(bot)
+                            elif event.button == 3: # 右鍵降級
+                                game.downgrade_bot(bot)
+                    y_check += 40
+        
+        clock.tick(FPS)
+
+def shop_screen(screen, game, font, title_font):
+    """黑客商城頁面"""
+    clock = pygame.time.Clock()
+    running = True
+    btn_back = Button(30, WINDOW_HEIGHT - 70, 100, 50, "返回", lambda: None)
+
+    def buy_item(key):
+        item = ITEMS[key]
+        if game.money >= item['price']:
+            game.money -= item['price']
+            
+            # 特殊道具：能量飲料直接使用
+            if key == "drink":
+                for b in game.bots:
+                    b.used_today = 0
+                game.log("已購買並飲用能量飲料！全員精力恢復！")
+                game.add_float_text(WINDOW_WIDTH//2, WINDOW_HEIGHT//2, "精力恢復!", item['color'])
+            else:
+                game.inventory[key] = game.inventory.get(key, 0) + 1
+                game.log(f"購買成功: {item['name']}")
+            
+            play_sound('cash')
+        else:
+            game.log("資金不足！")
+            play_sound('fail')
+
+    while running:
+        screen.fill(BG_COLOR)
+        screen.blit(title_font.render("黑客商城 (Black Market)", True, GOLD), (30, 20))
+        screen.blit(font.render(f"持有資金: ${game.money}", True, WHITE), (30, 70))
+
+        y = 120
+        buy_buttons = []
+        for key, item in ITEMS.items():
+            # 繪製商品卡片
+            card_rect = pygame.Rect(30, y, 740, 80)
+            pygame.draw.rect(screen, PANEL_COLOR, card_rect)
+            pygame.draw.rect(screen, item['color'], card_rect, 1)
+
+            screen.blit(font.render(item['name'], True, item['color']), (50, y + 15))
+            screen.blit(font.render(item['desc'], True, (200, 200, 200)), (50, y + 45))
+            
+            # 持有數量 (飲料不顯示持有)
+            if key != "drink":
+                count = game.inventory.get(key, 0)
+                screen.blit(font.render(f"持有: {count}", True, WHITE), (400, y + 30))
+
+            # 購買按鈕
+            btn_buy = Button(600, y + 20, 120, 40, f"${item['price']} 購買", lambda k=key: buy_item(k))
+            btn_buy.draw(screen, font)
+            buy_buttons.append(btn_buy)
+            
+            y += 100
+
+        btn_back.draw(screen, font)
+        pygame.display.flip()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT: pygame.quit(); sys.exit()
+            for btn in buy_buttons:
+                btn.check_click(event)
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if btn_back.rect.collidepoint(event.pos): running = False; play_sound('click')
+        clock.tick(FPS)
+
+def research_screen(screen, game, font, title_font):
+    """科技研發頁面"""
+    clock = pygame.time.Clock()
+    running = True
+    btn_back = Button(30, WINDOW_HEIGHT - 70, 100, 50, "返回", lambda: None)
+
+    def upgrade_tech(key):
+        tech = TECHNOLOGIES[key]
+        current_lv = game.research.get(key, 0)
+        if current_lv >= tech['max_level']:
+            return
+        
+        cost = int(tech['base_cost'] * (1.5 ** current_lv))
+        if game.money >= cost:
+            game.money -= cost
+            game.research[key] = current_lv + 1
+            game.log(f"研發成功: {tech['name']} Lv.{current_lv + 1}")
+            play_sound('success')
+        else:
+            game.log("資金不足！")
+            play_sound('fail')
+
+    while running:
+        screen.fill(BG_COLOR)
+        screen.blit(title_font.render("研發實驗室 (R&D Lab)", True, GOLD), (30, 20))
+        screen.blit(font.render(f"可用資金: ${game.money}", True, WHITE), (30, 70))
+
+        y = 120
+        buttons = []
+        for key, tech in TECHNOLOGIES.items():
+            level = game.research.get(key, 0)
+            cost = int(tech['base_cost'] * (1.5 ** level))
+            
+            # 繪製卡片
+            rect = pygame.Rect(30, y, 740, 90)
+            pygame.draw.rect(screen, PANEL_COLOR, rect)
+            pygame.draw.rect(screen, (100, 255, 255), rect, 1)
+
+            screen.blit(font.render(f"{tech['name']} (Lv.{level}/{tech['max_level']})", True, GOLD), (50, y + 15))
+            screen.blit(font.render(tech['desc'], True, WHITE), (50, y + 50))
+
+            if level < tech['max_level']:
+                btn = Button(600, y + 25, 140, 40, f"${cost} 研發", lambda k=key: upgrade_tech(k))
+                btn.draw(screen, font)
+                buttons.append(btn)
+            else:
+                screen.blit(font.render("已滿級", True, GREEN), (630, y + 35))
+            
+            y += 110
+
+        btn_back.draw(screen, font)
+        pygame.display.flip()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT: pygame.quit(); sys.exit()
+            for btn in buttons:
+                btn.check_click(event)
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if btn_back.rect.collidepoint(event.pos): running = False; play_sound('click')
+        clock.tick(FPS)
+
+def save_load_screen(screen, game, font, title_font, is_save_mode=False):
+    """存檔/讀檔選擇介面 (支援翻頁)"""
+    clock = pygame.time.Clock()
+    running = True
+    page = 0
+    items_per_page = 6 # 縮減每頁顯示數量
+    loaded_game_obj = None
+    
+    btn_back = Button(30, WINDOW_HEIGHT - 70, 100, 50, "返回", lambda: None)
+    
+    def open_save_folder():
+        try:
+            os.startfile(BASE_DIR)
+        except Exception:
+            pass
+    btn_open_folder = Button(300, WINDOW_HEIGHT - 70, 200, 50, "開啟存檔資料夾", open_save_folder)
+
+    # 如果是存檔模式，增加一個新建存檔按鈕
+    btn_new_save = None
+    if is_save_mode:
+        btn_new_save = Button(150, WINDOW_HEIGHT - 70, 140, 50, "新建存檔", lambda: None)
+
+    # --- 預先讀取檔案資訊 (避免每幀讀取) ---
+    def get_files_info():
+        info_list = []
+        try:
+            f_names = [f for f in os.listdir(BASE_DIR) if f.endswith('.pkl')]
+            # 按時間排序
+            f_names.sort(key=lambda x: os.path.getmtime(os.path.join(BASE_DIR, x)), reverse=True)
+            
+            for fname in f_names:
+                fpath = os.path.join(BASE_DIR, fname)
+                mtime = time.strftime('%Y-%m-%d %H:%M', time.localtime(os.path.getmtime(fpath)))
+                day = "?"
+                money = "?"
+                try:
+                    with open(fpath, 'rb') as f:
+                        data = pickle.load(f)
+                        if isinstance(data, dict):
+                            day = data.get('day', '?')
+                            money = data.get('money', '?')
+                except:
+                    pass
+                info_list.append({
+                    'name': fname,
+                    'mtime': mtime,
+                    'day': day,
+                    'money': money
+                })
+        except Exception:
+            pass
+        return info_list
+
+    files_info = get_files_info()
+
+    while running:
+        screen.fill(BG_COLOR)
+        
+        title_text = "選擇存檔位置 (覆蓋)" if is_save_mode else "選擇讀取進度"
+        screen.blit(title_font.render(title_text, True, GOLD), (30, 20))
+
+        total_pages = max(1, (len(files_info) - 1) // items_per_page + 1)
+        if page >= total_pages: page = max(0, total_pages - 1)
+
+        # 顯示列表
+        start = page * items_per_page
+        end = min(start + items_per_page, len(files_info))
+        
+        y = 80
+        for i in range(start, end):
+            info = files_info[i]
+            fname = info['name']
+            
+            display_name = fname
+            if fname == "autosave.pkl":
+                display_name = "自動存檔"
+            if i == 0: # 最新的檔案
+                display_name += " [最新]"
+            
+            # 繪製選項背景
+            row_rect = pygame.Rect(30, y, 740, 50)
+            bg_color = PANEL_COLOR
+            if row_rect.collidepoint(pygame.mouse.get_pos()):
+                bg_color = (70, 70, 70)
+            pygame.draw.rect(screen, bg_color, row_rect, 1) # 改為線框
+            
+            screen.blit(font.render(display_name, True, WHITE), (40, y + 10))
+            
+            # 顯示天數與資金
+            stats_text = f"第 {info['day']} 天 | ${info['money']}"
+            screen.blit(font.render(stats_text, True, GOLD), (300, y + 10))
+            
+            screen.blit(font.render(info['mtime'], True, (150, 150, 150)), (500, y + 10))
+
+            # 刪除按鈕
+            del_rect = pygame.Rect(680, y + 10, 60, 30)
+            del_color = RED if del_rect.collidepoint(pygame.mouse.get_pos()) else (180, 50, 50)
+            pygame.draw.rect(screen, del_color, del_rect)
+            screen.blit(font.render("刪除", True, WHITE), (690, y + 12))
+            
+            y += 60
+
+        # 頁碼
+        page_str = f"頁: {page+1}/{total_pages}"
+        screen.blit(font.render(page_str, True, WHITE), (680, 40))
+        
+        # 翻頁按鈕區域
+        prev_rect = pygame.Rect(650, 40, 20, 20)
+        next_rect = pygame.Rect(750, 40, 20, 20)
+        pygame.draw.polygon(screen, WHITE, [(665, 45), (665, 55), (655, 50)])
+        pygame.draw.polygon(screen, WHITE, [(755, 45), (755, 55), (765, 50)])
+
+        btn_back.draw(screen, font)
+        btn_open_folder.draw(screen, font)
+        if btn_new_save:
+            btn_new_save.draw(screen, font)
+
+        pygame.display.flip()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if btn_back.rect.collidepoint(event.pos):
+                    running = False
+                    play_sound('click')
+                
+                if btn_open_folder.rect.collidepoint(event.pos):
+                    play_sound('click')
+                    btn_open_folder.callback()
+                
+                if btn_new_save and btn_new_save.rect.collidepoint(event.pos):
+                    # 新建存檔
+                    # 使用可讀性更高的時間格式 (YYYYMMDD_HHMMSS)，並防止檔名重複
+                    timestamp = time.strftime('%Y%m%d_%H%M%S')
+                    base_name = f"save_{timestamp}"
+                    new_name = f"{base_name}.pkl"
+                    
+                    # 檢查檔案是否存在，若存在則加上流水號
+                    counter = 1
+                    while os.path.exists(os.path.join(BASE_DIR, new_name)):
+                        new_name = f"{base_name}_{counter}.pkl"
+                        counter += 1
+
+                    game.save_game(new_name)
+                    running = False
+                    play_sound('success')
+
+                # 翻頁
+                if prev_rect.collidepoint(event.pos) and page > 0: page -= 1; play_sound('click')
+                if next_rect.collidepoint(event.pos) and page < total_pages - 1: page += 1; play_sound('click')
+
+                # 點擊檔案
+                y_check = 80
+                for i in range(start, end):
+                    # 檢查刪除按鈕
+                    del_check_rect = pygame.Rect(680, y_check + 10, 60, 30)
+                    if del_check_rect.collidepoint(event.pos):
+                        try:
+                            os.remove(os.path.join(BASE_DIR, files_info[i]['name']))
+                            play_sound('click')
+                            # 重新讀取列表以刷新畫面
+                            files_info = get_files_info()
+                            total_pages = max(1, (len(files_info) - 1) // items_per_page + 1)
+                            if page >= total_pages: page = max(0, total_pages - 1)
+                            continue # 跳過後續點擊判斷
+                        except Exception as e:
+                            print(f"刪除失敗: {e}")
+
+                    if pygame.Rect(30, y_check, 740, 50).collidepoint(event.pos):
+                        fname = files_info[i]['name']
+                        if is_save_mode:
+                            if game: game.save_game(fname)
+                            play_sound('success')
+                        else:
+                            if game:
+                                game.load_game(fname)
+                            else:
+                                # 主選單讀取模式：建立臨時遊戲狀態來讀取
+                                temp_game = GameState("Standard")
+                                temp_game.load_game(fname)
+                                loaded_game_obj = temp_game
+                            play_sound('success')
+                        running = False
+                    y_check += 60
+        clock.tick(FPS)
+    return loaded_game_obj
+
+def statistics_screen(game, font, title_font):
+    """數據統計圖表頁面"""
+    clock = pygame.time.Clock()
+    running = True
+    btn_back = Button(30, WINDOW_HEIGHT - 70, 100, 50, "返回", lambda: None)
+
+    while running:
+        screen.fill(BG_COLOR)
+        screen.blit(title_font.render("營運數據分析", True, GOLD), (30, 20))
+
+        if len(game.history) < 2:
+            screen.blit(font.render("數據不足，請遊玩至少一天。", True, WHITE), (100, 300))
+        else:
+            # 繪製圖表區域
+            chart_rect = pygame.Rect(50, 80, 700, 350) # 縮減圖表高度
+            pygame.draw.rect(screen, (0, 20, 0), chart_rect)
+            pygame.draw.rect(screen, WHITE, chart_rect, 2)
+
+            # 取得數據極值以計算比例
+            days = [h['day'] for h in game.history]
+            moneys = [h['money'] for h in game.history]
+            reps = [h['reputation'] for h in game.history]
+            
+            max_money = max(max(moneys), 1)
+            max_rep = max(max(reps), 1)
+            min_val = min(min(moneys), min(reps), 0) # 包含負值
+
+            # 繪製折線函式
+            def draw_line(data, color, max_val):
+                points = []
+                for i, val in enumerate(data):
+                    x = chart_rect.left + (i / (len(data) - 1)) * chart_rect.width
+                    # 正規化 Y 軸 (簡單處理，將 min_val 視為底部或 0)
+                    # 這裡簡單將 0 對齊底部，負值會超出框框，為了簡化我們以 max_val 為頂，0 為底
+                    # 若有負債，我們將 chart_rect.bottom 視為 min_val
+                    range_val = max_val - min_val if max_val != min_val else 1
+                    y = chart_rect.bottom - ((val - min_val) / range_val) * chart_rect.height
+                    points.append((x, y))
+                
+                if len(points) > 1:
+                    pygame.draw.lines(screen, color, False, points, 3)
+
+            draw_line(moneys, GOLD, max_money)
+            draw_line(reps, TYPE_POLITICS, max_rep) # 使用藍色代表聲望
+
+            # 圖例
+            screen.blit(font.render(f"資金 (黃): ${moneys[-1]}", True, GOLD), (50, 450))
+            screen.blit(font.render(f"聲望 (藍): {reps[-1]}", True, TYPE_POLITICS), (300, 450))
+
+        btn_back.draw(screen, font)
+        pygame.display.flip()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT: pygame.quit(); sys.exit()
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if btn_back.rect.collidepoint(event.pos): running = False; play_sound('click')
+        clock.tick(FPS)
+
+def settings_screen(game, font, title_font):
+    """設定頁面"""
+    clock = pygame.time.Clock()
+    running = True
+    
+    btn_back = Button(30, WINDOW_HEIGHT - 70, 100, 50, "返回", lambda: None)
+
+    while running:
+        screen.fill(BG_COLOR)
+        screen.blit(title_font.render("遊戲設定", True, GOLD), (30, 20))
+
+        # --- 音量控制 ---
+        screen.blit(font.render(f"音量: {int(SETTINGS.volume * 100)}%", True, WHITE), (100, 150))
+        # 滑桿背景
+        bar_rect = pygame.Rect(250, 160, 400, 10)
+        pygame.draw.rect(screen, (0, 50, 0), bar_rect)
+        # 滑桿進度
+        fill_width = int(SETTINGS.volume * 400)
+        pygame.draw.rect(screen, GREEN, (250, 160, fill_width, 10))
+        # 滑桿按鈕
+        knob_x = 250 + fill_width
+        pygame.draw.circle(screen, WHITE, (knob_x, 165), 12)
+
+        btn_back.draw(screen, font)
+        pygame.display.flip()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if btn_back.rect.collidepoint(event.pos):
+                    running = False
+                    play_sound('click')
+
+            # 滑鼠拖曳或點擊調整音量
+            if pygame.mouse.get_pressed()[0]:
+                mx, my = pygame.mouse.get_pos()
+                if 230 <= mx <= 670 and 140 <= my <= 190:
+                    ratio = (mx - 250) / 400
+                    update_volume(ratio)
+
+        clock.tick(FPS)
+
+def main():
+    global screen
+    pygame.init()
+    screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+    pygame.display.set_caption("網路水軍模擬器 v0.2 (Pygame Edition)")
+    init_audio() # 初始化音效系統
+    pygame.key.start_text_input() # 啟用文字輸入
+    clock = pygame.time.Clock()
+    
+    # 設定字型
+    font = get_chinese_font(24)
+    small_font = get_chinese_font(18) # 較小的字型，用於日誌與按鈕
+    # 數位雨特效
+    rain = DigitalRain()
+    title_font = pygame.font.Font(pygame.font.match_font(["microsoftjhenghei", "simhei"]), 36)
+
+    # --- 難度選擇畫面 ---
+    game = None
+    
+    def start_new_game(d):
+        nonlocal game
+        game = GameState(d)
+        play_sound('click')
+
+    cx = WINDOW_WIDTH // 2 - 150
+    btn_easy = Button(cx, 300, 300, 50, "簡單 (資金$2000 / 風險低)", lambda: start_new_game("Easy"))
+    btn_standard = Button(cx, 370, 300, 50, "標準 (資金$1000 / 標準)", lambda: start_new_game("Standard"))
+    btn_hard = Button(cx, 440, 300, 50, "困難 (資金$500 / 風險高)", lambda: start_new_game("Hard"))
+
+    def open_load_menu():
+        nonlocal game
+        loaded = save_load_screen(screen, None, font, title_font, False)
+        if loaded:
+            game = loaded
+
+    btn_load_save = Button(cx, 510, 300, 50, "讀取存檔", open_load_menu)
+
+    # 尋找最新的存檔 (繼續遊戲功能)
+    btn_continue = None
+    save_files = [f for f in os.listdir(BASE_DIR) if f.endswith('.pkl')]
+    if save_files:
+        latest_save = max(save_files, key=lambda x: os.path.getmtime(os.path.join(BASE_DIR, x)))
+        mtime = time.strftime('%m/%d %H:%M', time.localtime(os.path.getmtime(os.path.join(BASE_DIR, latest_save))))
+        
+        def load_latest():
+            nonlocal game
+            try:
+                g = GameState("Standard") # 建立臨時狀態
+                g.load_game(latest_save)  # 讀取存檔覆蓋
+                game = g
+                play_sound('click')
+            except Exception as e:
+                print(f"讀取失敗: {e}")
+
+        btn_continue = Button(cx, 230, 300, 50, f"繼續遊戲 ({mtime})", load_latest)
+
+    while game is None:
+        screen.fill(BG_COLOR)
+        rain.update()
+        rain.draw(screen, font)
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            
+            if btn_continue:
+                btn_continue.check_click(event)
+            btn_easy.check_click(event)
+            btn_standard.check_click(event)
+            btn_hard.check_click(event)
+            btn_load_save.check_click(event)
+        
+        title_surf = title_font.render("網路水軍模擬器", True, GOLD)
+        screen.blit(title_surf, (WINDOW_WIDTH//2 - title_surf.get_width()//2, 150))
+        
+        if btn_continue:
+            btn_continue.draw(screen, font)
+        btn_easy.draw(screen, font)
+        btn_standard.draw(screen, font)
+        btn_hard.draw(screen, font)
+        btn_load_save.draw(screen, font)
+        
+        pygame.display.flip()
+        clock.tick(FPS)
+
+    # 建立按鈕
+    # 重新調整佈局以容納「研發」按鈕
+    btn_y = WINDOW_HEIGHT - 70
+    btn_buy_1 = Button(20, btn_y, 90, 50, "買1($100)", lambda: game.buy_bot(1))
+    btn_buy_5 = Button(120, btn_y, 90, 50, "買5($500)", lambda: game.buy_bot(5))
+    btn_next = Button(220, btn_y, 100, 50, "下一天", game.next_day) # 縮短文字
+    btn_tech = Button(330, btn_y, 80, 50, "研發", lambda: research_screen(screen, game, font, title_font)) # 新增
+    btn_load = Button(420, btn_y, 70, 50, "讀檔", lambda: save_load_screen(screen, game, font, title_font, False))
+    btn_manage = Button(500, btn_y, 70, 50, "部隊", lambda: account_management_screen(screen, game, font, title_font))
+    btn_shop = Button(580, btn_y, 70, 50, "商城", lambda: shop_screen(screen, game, font, title_font))
+    btn_stats = Button(660, btn_y, 60, 50, "圖表", lambda: statistics_screen(game, font, title_font))
+    btn_settings = Button(730, btn_y, 50, 50, "設定", lambda: settings_screen(game, font, title_font))
+
+    # --- 新手教學按鈕 ---
+    def next_tut():
+        game.tutorial_step += 1
+        if game.tutorial_step >= len(game.tutorial_data):
+            game.show_tutorial = False
+        play_sound('click')
+    
+    def skip_tut():
+        game.show_tutorial = False
+        play_sound('click')
+
+    btn_tut_next = Button(0, 0, 120, 40, "下一步", next_tut)
+    btn_tut_skip = Button(0, 0, 120, 40, "跳過教學", skip_tut)
+
+    # --- 策略選擇介面按鈕 ---
+    # 調整數量按鈕
+    def adjust_deploy(delta):
+        available = len([b for b in game.bots if b.is_available()])
+        new_count = game.deploy_count + delta
+        if 1 <= new_count <= available:
+            game.deploy_count = new_count
+            play_sound('click')
+
+    btn_dec = Button(500, 200, 50, 40, "-", lambda: adjust_deploy(-1)) # 上移
+    btn_inc = Button(660, 200, 50, 40, "+", lambda: adjust_deploy(1)) # 上移
+
+    input_box = InputBox(440, 320, 320, 40) # 手動模式輸入框
+    
+    # 道具選擇狀態
+    selected_item_key = None
+    
+    def toggle_item():
+        nonlocal selected_item_key
+        # 取得擁有的道具列表 (排除飲料)
+        owned = [k for k, v in game.inventory.items() if v > 0 and k != "drink"]
+        if not owned: return
+        
+        if selected_item_key is None:
+            selected_item_key = owned[0]
+        else:
+            try:
+                idx = owned.index(selected_item_key)
+                selected_item_key = owned[(idx + 1) % len(owned)]
+            except ValueError:
+                selected_item_key = owned[0]
+
+    btn_item_toggle = Button(0, 0, 140, 40, "選擇道具", toggle_item)
+
+    def execute_manual_mission(text_content=None):
+        nonlocal selected_item_key
+        if game.selected_mission:
+            # 若是按鈕觸發 (text_content為None)，則合併輸入框文字與組字區 (避免 IME 未確認問題)
+            text = text_content if text_content is not None else (input_box.text + input_box.composition_text)
+            
+            if not text: return # 防止空輸入
+            
+            score, intensity = game.sentiment.analyze(text, game.selected_mission.type)
+            bonus = intensity * 0.1
+            
+            # 區分自動生成與手動輸入的效果
+            is_auto = input_box.is_auto
+            source_type = "自動" if is_auto else "手動"
+            
+            if (score < 0 and "抹黑" in game.selected_mission.name) or (score > 0 and "洗白" in game.selected_mission.name):
+                bonus *= 2.0
+            
+            if is_auto:
+                bonus *= 0.6 # 自動生成雖然方便，但缺乏靈魂，效果打折
+            else:
+                bonus *= 1.2 # 手動輸入給予額外獎勵
+            
+            game.log(f"[{source_type}] 分析: {text[:8]}... (強度:{intensity})")
+            game.execute_mission(game.selected_mission, "manual", game.deploy_count, manual_bonus=bonus, use_item=selected_item_key)
+            game.selected_mission = None
+            input_box.text = ""
+            input_box.composition_text = ""
+            input_box.is_auto = False
+            selected_item_key = None # 重置道具選擇
+
+    btn_confirm = Button(0, 0, 140, 50, "確認執行", lambda: execute_manual_mission())
+    btn_cancel = Button(0, 0, 140, 50, "取消", lambda: (setattr(game, 'selected_mission', None)))
+    
+    def auto_gen():
+        if game.selected_mission:
+            input_box.text = game.sentiment.generate_copy(game.selected_mission.type, game.selected_mission.name)
+            input_box.composition_text = ""
+            input_box.is_auto = True # 標記為自動生成
+    btn_auto = Button(0, 0, 140, 40, "自動生成", auto_gen)
+
+    log_scroll_offset = 0 # 日誌捲動位置 (0 = 最底部)
+    mission_scroll_offset = 0 # 任務列表捲動位置
+    running = True
+    while running:
+        # 1. 事件處理
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            
+            # 處理滑鼠滾輪 (日誌捲動)
+            if event.type == pygame.MOUSEWHEEL:
+                mx, my = pygame.mouse.get_pos()
+                if pygame.Rect(520, 80, 260, 340).collidepoint(mx, my):
+                    log_scroll_offset += event.y
+                # 任務列表捲動
+                elif pygame.Rect(30, 120, 480, 300).collidepoint(mx, my):
+                    mission_scroll_offset -= event.y * 20
+                    mission_scroll_offset = max(0, min(mission_scroll_offset, max(0, len(game.available_missions) * 75 - 300)))
+
+            # 新手教學攔截
+            if game.show_tutorial:
+                btn_tut_next.check_click(event)
+                btn_tut_skip.check_click(event)
+                continue
+
+            # 如果遊戲結束或正在選擇策略，攔截一般操作
+            if game.game_over:
+                pass # 遊戲結束時不處理任何遊戲內操作
+            elif game.selected_mission:
+                # 策略選擇模式事件處理
+                btn_dec.check_click(event)
+                btn_inc.check_click(event)
+                btn_auto.check_click(event)
+                btn_cancel.check_click(event)
+                btn_confirm.check_click(event)
+                btn_item_toggle.check_click(event)
+                
+                submitted = input_box.handle_event(event)
+                if submitted:
+                    execute_manual_mission(submitted)
+            else:
+                # 一般模式
+                btn_buy_1.check_click(event)
+                btn_buy_5.check_click(event)
+                btn_next.check_click(event)
+                btn_tech.check_click(event)
+                btn_load.check_click(event)
+                btn_manage.check_click(event)
+                btn_stats.check_click(event)
+                btn_settings.check_click(event)
+                btn_shop.check_click(event)
+
+                # 處理任務列表的點擊
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    mx, my = event.pos
+                    # 檢查是否點擊了任務區域
+                    for i, mission in enumerate(game.available_missions):
+                        # 考慮捲動偏移量
+                        mission_y = 120 + i * 75 - mission_scroll_offset
+                        mission_rect = pygame.Rect(30, mission_y, 480, 70)
+                        if mission_rect.collidepoint(mx, my) and 120 <= my <= 420: # 確保在顯示範圍內
+                            game.selected_mission = mission # 進入策略選擇模式
+                            
+                            # 智慧預設：計算剛好滿足需求的數量
+                            available_bots = [b for b in game.bots if b.is_available()]
+                            available_bots.sort(key=lambda b: b.level, reverse=True)
+                            
+                            needed_count = 0
+                            current_inf = 0
+                            for b in available_bots:
+                                if current_inf >= mission.required_influence:
+                                    break
+                                current_inf += b.influence
+                                needed_count += 1
+                            
+                            # 至少派 1 個，除非沒人
+                            game.deploy_count = max(1, needed_count) if available_bots else 0
+                            break
+                
+        # 2.5 更新邏輯
+        # 更新浮動文字
+        for ft in game.floating_texts:
+            ft.update()
+        game.floating_texts = [ft for ft in game.floating_texts if ft.timer > 0]
+        
+        # 更新新聞跑馬燈
+        if game: game.news_ticker.update()
+
+        # 2. 畫面繪製
+        screen.fill(BG_COLOR)
+        rain.update()
+        rain.draw(screen, font)
+
+        # 繪製背景網格 (駭客風)
+        for x in range(0, WINDOW_WIDTH, 40):
+            pygame.draw.line(screen, (0, 30, 0), (x, 0), (x, WINDOW_HEIGHT), 1)
+        for y in range(0, WINDOW_HEIGHT, 40):
+            pygame.draw.line(screen, (0, 30, 0), (0, y), (WINDOW_WIDTH, y), 1)
+
+        # --- 頂部資訊欄 ---
+        # 分兩行顯示，優化排版
+        row1 = f"第 {game.day} 天 | 資金: ${game.money} (+${game.pending_money})"
+        row2 = f"聲望: {game.reputation}/{game.target_reputation} | 帳號: {len(game.bots)}"
+        screen.blit(title_font.render(row1, True, GOLD), (30, 15))
+        screen.blit(font.render(row2, True, WHITE), (30, 55))
+
+        # 顯示破產倒數警告
+        if game.bankruptcy_days > 0:
+            warn_text = f"⚠ 破產倒數: {3 - game.bankruptcy_days} 天"
+            warn_surf = title_font.render(warn_text, True, RED)
+            screen.blit(warn_surf, (30, 50))
+
+        # --- 左側：任務列表 ---
+        screen.blit(font.render("可用任務 (點擊執行):", True, WHITE), (30, 90))
+        # 設定裁切區域 (Clipping) 以實現捲動效果
+        clip_rect = pygame.Rect(30, 120, 480, 300)
+        screen.set_clip(clip_rect)
+
+        for i, mission in enumerate(game.available_missions):
+            rect = pygame.Rect(30, 120 + i * 75 - mission_scroll_offset, 480, 70)
+            
+            # 任務滑鼠懸停效果
+            color = PANEL_COLOR
+            if rect.collidepoint(pygame.mouse.get_pos()):
+                color = (70, 70, 70)
+            
+            pygame.draw.rect(screen, BLACK, rect) # 黑底
+            pygame.draw.rect(screen, TEXT_COLOR, rect, 1) # 綠框
+            
+            # 任務文字
+            type_color = TYPE_COLORS.get(mission.type, WHITE)
+            info_text = f"[{mission.platform}] {mission.name}"
+            detail_text = f"難度: {mission.difficulty} | 報酬: ${mission.reward} | 需求影響力: {mission.required_influence}"
+            
+            screen.blit(font.render(info_text, True, type_color), (rect.x + 10, rect.y + 10))
+            screen.blit(font.render(detail_text, True, TEXT_COLOR), (rect.x + 10, rect.y + 35))
+
+        screen.set_clip(None) # 取消裁切
+
+        # --- 左側下方：帳號可視化 ---
+        viz_y = 430
+        screen.blit(font.render("部隊:", True, WHITE), (30, viz_y))
+        
+        # 統計數據
+        active_bots = [b for b in game.bots if not b.is_banned]
+        total_inf = sum(b.influence for b in active_bots)
+        # 計算今日可用總次數
+        total_uses_left = sum(b.max_uses - b.used_today for b in active_bots)
+        daily_salary = len(game.bots) * game.salary_per_bot
+        
+        screen.blit(font.render(f"影響: {total_inf}", True, GOLD), (90, viz_y))
+        screen.blit(font.render(f"行動: {total_uses_left}", True, (100, 255, 255)), (230, viz_y))
+        screen.blit(font.render(f"工資: -${daily_salary}", True, RED), (360, viz_y))
+        
+        # 繪製方塊
+        start_x, start_y = 30, viz_y + 30
+        box_size, gap = 15, 5
+        cols = 30
+        
+        for idx, bot in enumerate(game.bots):
+            row = idx // cols
+            col = idx % cols
+            bx = start_x + col * (box_size + gap)
+            by = start_y + row * (box_size + gap)
+            
+            color = GREEN
+            if bot.is_banned: color = RED
+            elif bot.level > 1: color = (0, 255, 255)
+            # 如果今日次數用完，變暗
+            if not bot.is_banned and bot.used_today >= bot.max_uses:
+                color = (50, 100, 50)
+            
+            b_rect = pygame.Rect(bx, by, box_size, box_size)
+            pygame.draw.rect(screen, color, b_rect)
+            
+            # 繪製類型標記 (中心小點)
+            if not bot.is_banned:
+                pygame.draw.circle(screen, TYPE_COLORS.get(bot.bot_type, WHITE), b_rect.center, 3)
+            
+            if b_rect.collidepoint(pygame.mouse.get_pos()):
+                pygame.draw.rect(screen, WHITE, b_rect, 2)
+                tip = f"[{bot.bot_type}] Lv{bot.level} Inf:{bot.influence} 用量:{bot.used_today}/{bot.max_uses}" if not bot.is_banned else "已封鎖"
+                tip_surf = font.render(tip, True, WHITE)
+                screen.blit(tip_surf, (bx, by - 25))
+
+        # --- 右側：系統日誌 ---
+        log_bg = pygame.Rect(520, 80, 260, 340)
+        pygame.draw.rect(screen, BLACK, log_bg)
+        pygame.draw.rect(screen, TEXT_COLOR, log_bg, 1) # 綠色邊框
+        
+        screen.blit(font.render("系統日誌:", True, WHITE), (520, 50))
+        
+        # 自動換行處理
+        wrapped_lines = []
+        max_width = 240 # 260 - 20 padding
+        
+        for log in game.logs:
+            current_line = ""
+            for char in log:
+                if small_font.size(current_line + char)[0] <= max_width:
+                    current_line += char
+                else:
+                    wrapped_lines.append(current_line)
+                    current_line = char
+            if current_line:
+                wrapped_lines.append(current_line)
+
+        # 只顯示能放入框內的最後幾行
+        line_height = 22
+        max_lines = 320 // line_height
+        
+        # 計算捲動限制
+        total_lines = len(wrapped_lines)
+        max_scroll = max(0, total_lines - max_lines)
+        
+        # 限制捲動範圍並計算切片
+        if log_scroll_offset < 0: log_scroll_offset = 0
+        if log_scroll_offset > max_scroll: log_scroll_offset = max_scroll
+
+        if log_scroll_offset == 0:
+            lines_to_draw = wrapped_lines[-max_lines:]
+        else:
+            end = total_lines - log_scroll_offset
+            start = max(0, end - max_lines)
+            lines_to_draw = wrapped_lines[start:end]
+
+        log_y = 90
+        for line in lines_to_draw:
+            log_surf = small_font.render(line, True, (200, 200, 200))
+            screen.blit(log_surf, (530, log_y))
+            log_y += line_height
+
+        # --- 底部：按鈕 ---
+        btn_buy_1.draw(screen, small_font)
+        btn_buy_5.draw(screen, small_font)
+        btn_next.draw(screen, font)
+        btn_tech.draw(screen, font)
+        btn_load.draw(screen, font)
+        btn_manage.draw(screen, font)
+        btn_shop.draw(screen, font)
+        btn_stats.draw(screen, font)
+        btn_settings.draw(screen, font)
+
+        # --- 底部：新聞跑馬燈 ---
+        if game: game.news_ticker.draw(screen, font)
+
+        # --- 繪製浮動文字 ---
+        for ft in game.floating_texts:
+            ft.draw(screen, font)
+
+        # --- 策略選擇彈出視窗 (Overlay) ---
+        if game.selected_mission:
+            # 對話框背景 (置中顯示，寬度加大以避免文字溢出)
+            dialog_rect = pygame.Rect(100, 80, 600, 440) # 加高一點
+            pygame.draw.rect(screen, BLACK, dialog_rect)
+            pygame.draw.rect(screen, TEXT_COLOR, dialog_rect, 2)
+            
+            # 標題與說明
+            cx = dialog_rect.centerx
+            title_surf = title_font.render("撰寫輿論劇本", True, GOLD)
+            screen.blit(title_surf, (cx - title_surf.get_width() // 2, dialog_rect.y + 30))
+            
+            m_color = PLATFORMS.get(game.selected_mission.platform, {}).get('color', WHITE)
+            mission_text = font.render(f"目標: [{game.selected_mission.type}] {game.selected_mission.name}", True, m_color)
+            screen.blit(mission_text, (cx - mission_text.get_width() // 2, dialog_rect.y + 80))
+            
+            # --- 數量選擇控制 ---
+            screen.blit(font.render("派出帳號數量:", True, (200, 200, 200)), (140, dialog_rect.y + 130))
+            avail_bots = [b for b in game.bots if b.is_available()]
+            avail_bots.sort(key=lambda b: b.level, reverse=True)
+            
+            # 更新按鈕位置
+            btn_dec.rect.topleft = (300, dialog_rect.y + 125)
+            btn_inc.rect.topleft = (450, dialog_rect.y + 125)
+            
+            screen.blit(font.render(f"{game.deploy_count} / {len(avail_bots)}", True, WHITE), (360, dialog_rect.y + 135))
+            
+            btn_dec.draw(screen, font)
+            btn_inc.draw(screen, font)
+
+            # --- 道具選擇 ---
+            item_text = "無道具"
+            item_color = (150, 150, 150)
+            if selected_item_key and game.inventory.get(selected_item_key, 0) > 0:
+                item_data = ITEMS[selected_item_key]
+                item_text = f"{item_data['name']} (剩餘:{game.inventory[selected_item_key]})"
+                item_color = item_data['color']
+            
+            btn_item_toggle.rect.topleft = (140, dialog_rect.y + 170)
+            btn_item_toggle.draw(screen, font)
+            screen.blit(font.render(item_text, True, item_color), (300, dialog_rect.y + 180))
+
+            # --- 手動輸入介面 ---
+            screen.blit(font.render("輸入操作文案:", True, GREEN), (140, dialog_rect.y + 220))
+            
+            input_box.rect = pygame.Rect(140, dialog_rect.y + 250, 520, 40)
+            input_box.draw(screen)
+            
+            btn_auto.rect.topleft = (140, dialog_rect.y + 300)
+            btn_auto.draw(screen, font)
+            
+            # 確認與取消按鈕
+            btn_confirm.rect.topleft = (140, dialog_rect.y + 360)
+            btn_cancel.rect.topleft = (520, dialog_rect.y + 360)
+            
+            btn_confirm.draw(screen, font)
+            btn_cancel.draw(screen, font)
+
+        # --- 成就通知彈出視窗 ---
+        if game.achievement_timer > 0:
+            game.achievement_timer -= 1
+            # 繪製通知框
+            notif_rect = pygame.Rect(WINDOW_WIDTH // 2 - 250, 80, 500, 50)
+            pygame.draw.rect(screen, BLACK, notif_rect)
+            pygame.draw.rect(screen, GOLD, notif_rect, 2)
+            
+            msg_surf = font.render(game.current_achievement_msg, True, GOLD)
+            msg_rect = msg_surf.get_rect(center=notif_rect.center)
+            screen.blit(msg_surf, msg_rect)
+        elif game.achievement_queue:
+            game.current_achievement_msg = game.achievement_queue.pop(0)
+            game.achievement_timer = 180 # 顯示 3 秒 (60 FPS * 3)
+
+        # --- 新手教學 Overlay ---
+        if game.show_tutorial and game.tutorial_step < len(game.tutorial_data):
+            step = game.tutorial_data[game.tutorial_step]
+            
+            # 遮罩
+            overlay = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT))
+            overlay.set_alpha(200)
+            overlay.fill(BLACK)
+            screen.blit(overlay, (0, 0))
+            
+            # 高亮區域
+            if step['rect']:
+                rx, ry, rw, rh = step['rect']
+                pygame.draw.rect(screen, GOLD, (rx, ry, rw, rh), 2)
+                hl_surf = pygame.Surface((rw, rh))
+                hl_surf.set_alpha(30)
+                hl_surf.fill(WHITE)
+                screen.blit(hl_surf, (rx, ry))
+            
+            # 對話框
+            dw, dh = 500, 320
+            dx, dy = (WINDOW_WIDTH - dw)//2, (WINDOW_HEIGHT - dh)//2
+            pygame.draw.rect(screen, PANEL_COLOR, (dx, dy, dw, dh))
+            pygame.draw.rect(screen, GREEN, (dx, dy, dw, dh), 2)
+            
+            # 標題
+            t_surf = title_font.render(f"新手教學 ({game.tutorial_step + 1}/{len(game.tutorial_data)})", True, GOLD)
+            screen.blit(t_surf, (dx + 20, dy + 20))
+            
+            # 內容
+            y_off = 80
+            for line in step['text'].split('\n'):
+                screen.blit(font.render(line, True, WHITE), (dx + 30, dy + y_off))
+                y_off += 30
+            
+            # 更新按鈕位置並繪製
+            btn_tut_skip.rect.topleft = (dx + 30, dy + 250)
+            btn_tut_next.rect.topleft = (dx + 350, dy + 250)
+            btn_tut_skip.draw(screen, font)
+            btn_tut_next.draw(screen, font)
+
+        # --- 遊戲結束畫面 (Game Over Screen) ---
+        if game.game_over:
+            overlay = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT))
+            overlay.set_alpha(220)
+            overlay.fill(BLACK)
+            screen.blit(overlay, (0, 0))
+            
+            if game.victory:
+                msg1 = "恭喜！你已成為輿論之王！"
+                msg2 = f"在第 {game.day} 天達成目標，最終資金: ${game.money}"
+                color = GOLD
+            elif game.bankruptcy_days >= 3:
+                msg1 = "遊戲結束：宣告破產"
+                msg2 = "連續 3 天資金為負，公司倒閉..."
+                color = RED
+            else:
+                msg1 = "遊戲結束：破產且無可用帳號"
+                msg2 = "你的水軍帝國已經瓦解..."
+                color = RED
+            
+            screen.blit(title_font.render(msg1, True, color), (WINDOW_WIDTH//2 - 200, 300))
+            screen.blit(font.render(msg2, True, WHITE), (WINDOW_WIDTH//2 - 180, 360))
+            screen.blit(font.render("請關閉視窗重新開始", True, (150, 150, 150)), (WINDOW_WIDTH//2 - 100, 420))
+
+        # 3. 更新螢幕
+        pygame.display.flip()
+        clock.tick(FPS)
+
+    pygame.quit()
+    sys.exit()
+
+if __name__ == "__main__":
+    main()
