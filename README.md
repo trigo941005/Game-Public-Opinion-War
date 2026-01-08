@@ -35,9 +35,11 @@
 1 克隆專案:
 git clone [您的專案 GitHub 連結]
 cd [您的專案目錄]
+
 2 安裝所需套件:
 pip install pygame
 (如果還有其他套件，請在此處列出，例如 pip install [其他套件])
+
 3 執行遊戲:
 python main.py  # 或您的遊戲主檔案名稱
 
